@@ -19,34 +19,27 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // Ground
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(shape::Plane::from_size(5.0).into()),
-        material: materials.add(Color::rgb(0.3, 0.5, 0.3).into()),
-        ..default()
-    });
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(5.0, 5.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
+    ));
     // Cube
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-        material: materials.add(Color::rgb(0.8, 0.7, 0.6).into()),
-        transform: Transform::from_xyz(0.0, 0.5, 0.0),
-        ..default()
-    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
+        Transform::from_xyz(0.0, 0.5, 0.0),
+    ));
     // Light
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            intensity: 1500.0,
+    commands.spawn((
+        PointLight {
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
-        ..default()
-    });
+        Transform::from_xyz(4.0, 8.0, 4.0),
+    ));
     // Camera
     commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_translation(Vec3::new(0.0, 1.5, 5.0)),
-            ..default()
-        },
+        Transform::from_translation(Vec3::new(0.0, 1.5, 5.0)),
         PanOrbitCamera {
             // Disable smoothing, since the animation takes care of that
             orbit_smoothness: 0.0,
@@ -60,11 +53,11 @@ fn setup(
 // Animate the camera's position
 fn animate(time: Res<Time>, mut pan_orbit_query: Query<&mut PanOrbitCamera>) {
     for mut pan_orbit in pan_orbit_query.iter_mut() {
-        // Must set target values, not alpha/beta directly
-        pan_orbit.target_alpha += 15f32.to_radians() * time.delta_seconds();
-        pan_orbit.target_beta = time.elapsed_seconds_wrapped().sin() * TAU * 0.1;
+        // Must set target values, not yaw/pitch directly
+        pan_orbit.target_yaw += 15f32.to_radians() * time.delta_secs();
+        pan_orbit.target_pitch = time.elapsed_secs_wrapped().sin() * TAU * 0.1;
         pan_orbit.radius =
-            Some((((time.elapsed_seconds_wrapped() * 2.0).cos() + 1.0) * 0.5) * 2.0 + 4.0);
+            Some((((time.elapsed_secs_wrapped() * 2.0).cos() + 1.0) * 0.5) * 2.0 + 4.0);
 
         // Force camera to update its transform
         pan_orbit.force_update = true;

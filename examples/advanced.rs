@@ -1,8 +1,13 @@
 //! Demonstrates all common configuration options,
 //! and how to modify them at runtime
+//!
+//! Controls:
+//!   Orbit: Middle click
+//!   Pan: Shift + Middle click
+//!   Zoom: Mousewheel OR Right click + move mouse up/down
 
 use bevy::prelude::*;
-use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
+use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, TouchControls};
 use std::f32::consts::TAU;
 
 fn main() {
@@ -20,47 +25,42 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // Ground
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(shape::Plane::from_size(5.0).into()),
-        material: materials.add(Color::rgb(0.3, 0.5, 0.3).into()),
-        ..default()
-    });
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(5.0, 5.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
+    ));
     // Cube
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-        material: materials.add(Color::rgb(0.8, 0.7, 0.6).into()),
-        transform: Transform::from_xyz(0.0, 0.5, 0.0),
-        ..default()
-    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
+        Transform::from_xyz(0.0, 0.5, 0.0),
+    ));
     // Light
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            intensity: 1500.0,
+    commands.spawn((
+        PointLight {
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
-        ..default()
-    });
+        Transform::from_xyz(4.0, 8.0, 4.0),
+    ));
     // Camera
     commands.spawn((
-        // Note we're setting the initial position below with alpha, beta, and radius, hence
+        // Note we're setting the initial position below with yaw, pitch, and radius, hence
         // we don't set transform on the camera.
-        Camera3dBundle::default(),
         PanOrbitCamera {
             // Set focal point (what the camera should look at)
             focus: Vec3::new(0.0, 1.0, 0.0),
             // Set the starting position, relative to focus (overrides camera's transform).
-            alpha: Some(TAU / 8.0),
-            beta: Some(TAU / 8.0),
+            yaw: Some(TAU / 8.0),
+            pitch: Some(TAU / 8.0),
             radius: Some(5.0),
             // Set limits on rotation and zoom
-            alpha_upper_limit: Some(TAU / 4.0),
-            alpha_lower_limit: Some(-TAU / 4.0),
-            beta_upper_limit: Some(TAU / 3.0),
-            beta_lower_limit: Some(-TAU / 3.0),
+            yaw_upper_limit: Some(TAU / 4.0),
+            yaw_lower_limit: Some(-TAU / 4.0),
+            pitch_upper_limit: Some(TAU / 3.0),
+            pitch_lower_limit: Some(-TAU / 3.0),
             zoom_upper_limit: Some(5.0),
-            zoom_lower_limit: Some(1.0),
+            zoom_lower_limit: 1.0,
             // Adjust sensitivity of controls
             orbit_sensitivity: 1.5,
             pan_sensitivity: 0.5,
@@ -71,19 +71,28 @@ fn setup(
             button_orbit: MouseButton::Middle,
             button_pan: MouseButton::Middle,
             modifier_pan: Some(KeyCode::ShiftLeft),
+            // Also enable zooming by holding right click and moving the mouse
+            button_zoom: Some(MouseButton::Right),
+            // Optionally configure button zoom to use left-right mouse movement
+            // button_zoom_axis: ButtonZoomAxis::X,
+            // Optionally reverse the button-based zoom independently to `reversed_zoom`
+            // button_zoom_reverse: true,
             // Reverse the zoom direction
             reversed_zoom: true,
+            // Use alternate touch controls
+            touch_controls: TouchControls::TwoFingerOrbit,
             ..default()
         },
     ));
 }
 
-// Press 'T' to toggle the camera controls
+// This is how you can change config at runtime.
+// Press 'T' to toggle the camera controls.
 fn toggle_camera_controls_system(
-    key_input: Res<Input<KeyCode>>,
+    key_input: Res<ButtonInput<KeyCode>>,
     mut pan_orbit_query: Query<&mut PanOrbitCamera>,
 ) {
-    if key_input.just_pressed(KeyCode::T) {
+    if key_input.just_pressed(KeyCode::KeyT) {
         for mut pan_orbit in pan_orbit_query.iter_mut() {
             pan_orbit.enabled = !pan_orbit.enabled;
         }

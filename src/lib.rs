@@ -1,18 +1,29 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
-use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
+use std::f32::consts::PI;
+
+use bevy::camera::{CameraUpdateSystems, RenderTarget};
+use bevy::input::gestures::PinchGesture;
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::render::camera::RenderTarget;
+use bevy::transform::TransformSystems;
 use bevy::window::{PrimaryWindow, WindowRef};
 #[cfg(feature = "bevy_egui")]
-use bevy_egui::EguiSet;
+use bevy_egui::EguiPreUpdateSet;
+
 #[cfg(feature = "bevy_egui")]
-use egui::EguiWantsFocus;
-use std::f32::consts::{PI, TAU};
+pub use crate::egui::{EguiFocusIncludesHover, EguiWantsFocus};
+use crate::input::{button_zoom_just_pressed, mouse_key_tracker, MouseKeyTracker};
+pub use crate::touch::TouchControls;
+use crate::touch::{touch_tracker, TouchGestures, TouchTracker};
+use crate::traits::OptionalClamp;
 
 #[cfg(feature = "bevy_egui")]
 mod egui;
+mod input;
+mod touch;
+mod traits;
 mod util;
 
 /// Bevy plugin that contains the systems for controlling `PanOrbitCamera` components.
@@ -31,33 +42,35 @@ pub struct PanOrbitCameraPlugin;
 
 impl Plugin for PanOrbitCameraPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ActiveCameraData::default())
+        app.init_resource::<ActiveCameraData>()
+            .init_resource::<MouseKeyTracker>()
+            .init_resource::<TouchTracker>()
             .add_systems(
-                Update,
+                PostUpdate,
                 (
-                    active_viewport_data
-                        .run_if(|active_cam: Res<ActiveCameraData>| !active_cam.manual),
+                    (
+                        active_viewport_data
+                            .run_if(|active_cam: Res<ActiveCameraData>| !active_cam.manual),
+                        mouse_key_tracker,
+                        touch_tracker,
+                    ),
                     pan_orbit_camera,
                 )
                     .chain()
-                    .in_set(PanOrbitCameraSystemSet),
+                    .in_set(PanOrbitCameraSystemSet)
+                    .before(TransformSystems::Propagate)
+                    .before(CameraUpdateSystems),
             );
 
         #[cfg(feature = "bevy_egui")]
         {
             app.init_resource::<EguiWantsFocus>()
+                .init_resource::<EguiFocusIncludesHover>()
                 .add_systems(
-                    Update,
+                    PostUpdate,
                     egui::check_egui_wants_focus
-                        .after(EguiSet::InitContexts)
+                        .after(EguiPreUpdateSet::InitContexts)
                         .before(PanOrbitCameraSystemSet),
-                )
-                .configure_sets(
-                    Update,
-                    PanOrbitCameraSystemSet.run_if(resource_equals(EguiWantsFocus {
-                        prev: false,
-                        curr: false,
-                    })),
                 );
         }
     }
@@ -69,8 +82,6 @@ pub struct PanOrbitCameraSystemSet;
 
 /// Tags an entity as capable of panning and orbiting, and provides a way to configure the
 /// camera's behaviour and controls.
-/// The entity must have `Transform` and `Projection` components. Typically you would add a
-/// `Camera3dBundle` which already contains these.
 /// # Example
 /// ```no_run
 /// # use bevy::prelude::*;
@@ -85,15 +96,13 @@ pub struct PanOrbitCameraSystemSet;
 /// fn setup(mut commands: Commands) {
 ///     commands
 ///         .spawn((
-///             Camera3dBundle {
-///                 transform: Transform::from_translation(Vec3::new(0.0, 1.5, 5.0)),
-///                 ..default()
-///             },
+///             Transform::from_translation(Vec3::new(0.0, 1.5, 5.0)),
 ///             PanOrbitCamera::default(),
 ///         ));
 ///  }
 /// ```
-#[derive(Component, Copy, Clone, Debug, PartialEq)]
+#[derive(Component, Reflect, Copy, Clone, Debug, PartialEq)]
+#[require(Camera3d)]
 pub struct PanOrbitCamera {
     /// The point to orbit around, and what the camera looks at. Updated automatically.
     /// If you want to change the focus programmatically after initialization, set `target_focus`
@@ -107,123 +116,164 @@ pub struct PanOrbitCamera {
     /// Automatically updated.
     /// Defaults to `None`.
     pub radius: Option<f32>,
-    /// The scale of the orthographic projection. This field only applies to orthographic cameras.
-    /// If set to `None`, it will be calculated from the camera's current position during
-    /// initialization.
-    /// Automatically updated.
-    /// Defaults to `None`.
-    pub scale: Option<f32>,
     /// Rotation in radians around the global Y axis (longitudinal). Updated automatically.
-    /// If both `alpha` and `beta` are `0.0`, then the camera will be looking forward, i.e. in
+    /// If both `yaw` and `pitch` are `0.0`, then the camera will be looking forward, i.e. in
     /// the `Vec3::NEG_Z` direction, with up being `Vec3::Y`.
     /// If set to `None`, it will be calculated from the camera's current position during
     /// initialization.
-    /// You should not update this after initialization - use `target_alpha` instead.
+    /// You should not update this after initialization - use `target_yaw` instead.
     /// Defaults to `None`.
-    pub alpha: Option<f32>,
+    pub yaw: Option<f32>,
     /// Rotation in radians around the local X axis (latitudinal). Updated automatically.
-    /// If both `alpha` and `beta` are `0.0`, then the camera will be looking forward, i.e. in
+    /// If both `yaw` and `pitch` are `0.0`, then the camera will be looking forward, i.e. in
     /// the `Vec3::NEG_Z` direction, with up being `Vec3::Y`.
     /// If set to `None`, it will be calculated from the camera's current position during
     /// initialization.
-    /// You should not update this after initialization - use `target_beta` instead.
+    /// You should not update this after initialization - use `target_pitch` instead.
     /// Defaults to `None`.
-    pub beta: Option<f32>,
+    pub pitch: Option<f32>,
     /// The target focus point. The camera will smoothly transition to this value. Updated
     /// automatically, but you can also update it manually to control the camera independently of
     /// the mouse controls, e.g. with the keyboard.
     /// Defaults to `Vec3::ZERO`.
     pub target_focus: Vec3,
-    /// The target alpha value. The camera will smoothly transition to this value. Updated
+    /// The target yaw value. The camera will smoothly transition to this value. Updated
     /// automatically, but you can also update it manually to control the camera independently of
     /// the mouse controls, e.g. with the keyboard.
     /// Defaults to `0.0`.
-    pub target_alpha: f32,
-    /// The target beta value. The camera will smoothly transition to this value Updated
+    pub target_yaw: f32,
+    /// The target pitch value. The camera will smoothly transition to this value Updated
     /// automatically, but you can also update it manually to control the camera independently of
     /// the mouse controls, e.g. with the keyboard.
     /// Defaults to `0.0`.
-    pub target_beta: f32,
+    pub target_pitch: f32,
     /// The target radius value. The camera will smoothly transition to this value. Updated
     /// automatically, but you can also update it manually to control the camera independently of
     /// the mouse controls, e.g. with the keyboard.
     /// Defaults to `1.0`.
     pub target_radius: f32,
-    /// The target scale for orthographic projection. The camera will smoothly transition to this value.
-    /// This field is only applicable with Orthographic cameras.
-    /// Updated automatically, but you can also update it manually to control the camera independently
-    /// of the mouse controls, e.g. with the keyboard.
-    /// Defaults to `1.0`.
-    pub target_scale: f32,
-    /// Upper limit on the `alpha` value, in radians. Use this to restrict the maximum rotation
+    /// Upper limit on the `yaw` value, in radians. Use this to restrict the maximum rotation
     /// around the global Y axis.
     /// Defaults to `None`.
-    pub alpha_upper_limit: Option<f32>,
-    /// Lower limit on the `alpha` value, in radians. Use this to restrict the maximum rotation
+    pub yaw_upper_limit: Option<f32>,
+    /// Lower limit on the `yaw` value, in radians. Use this to restrict the maximum rotation
     /// around the global Y axis.
     /// Defaults to `None`.
-    pub alpha_lower_limit: Option<f32>,
-    /// Upper limit on the `beta` value, in radians. Use this to restrict the maximum rotation
+    pub yaw_lower_limit: Option<f32>,
+    /// Upper limit on the `pitch` value, in radians. Use this to restrict the maximum rotation
     /// around the local X axis.
     /// Defaults to `None`.
-    pub beta_upper_limit: Option<f32>,
-    /// Lower limit on the `beta` value, in radians. Use this to restrict the maximum rotation
+    pub pitch_upper_limit: Option<f32>,
+    /// Lower limit on the `pitch` value, in radians. Use this to restrict the maximum rotation
     /// around the local X axis.
     /// Defaults to `None`.
-    pub beta_lower_limit: Option<f32>,
+    pub pitch_lower_limit: Option<f32>,
+    /// The origin for a shape to restrict the cameras `focus` position.
+    /// Defaults to `Vec3::ZERO`.
+    pub focus_bounds_origin: Vec3,
+    /// The shape (Sphere or Cuboid) that the `focus` is restricted by. Centered on the
+    /// `focus_bounds_origin`.
+    /// Defaults to `None`.
+    pub focus_bounds_shape: Option<FocusBoundsShape>,
     /// Upper limit on the zoom. This applies to `radius`, in the case of using a perspective
-    /// camera, or the projection scale in the case of using an orthographic
-    /// camera. Note that the zoom value (radius or scale) will never go below `0.02`.
+    /// camera, or the projection's scale in the case of using an orthographic camera.
     /// Defaults to `None`.
     pub zoom_upper_limit: Option<f32>,
     /// Lower limit on the zoom. This applies to `radius`, in the case of using a perspective
-    /// camera, or the projection scale in the case of using an orthographic
-    /// camera. Note that the zoom value (radius or scale) will never go below `0.02`.
-    /// Defaults to `None`.
-    pub zoom_lower_limit: Option<f32>,
-    /// The sensitivity of the orbiting motion. Defaults to `1.0`.
+    /// camera, or the projection's scale in the case of using an orthographic camera.
+    /// Should always be >0 otherwise you'll get stuck at 0.
+    /// Defaults to `0.05`.
+    pub zoom_lower_limit: f32,
+    /// The sensitivity of the orbiting motion. A value of `0.0` disables orbiting.
+    /// Defaults to `1.0`.
     pub orbit_sensitivity: f32,
-    /// How orbit sensitivity is scaled as you zoom from zoom_upper_limit to zoom_lower_limit. A value of 1.0
-    /// Will result in a linear decrease in orbit sensitivity as the camera approaches the lower limit.
-    /// has no effect if either limit is None
+    /// How orbit sensitivity is scaled as you zoom from zoom_upper_limit to zoom_lower_limit.
+    /// A value of 1.0 will result in a linear decrease in orbit sensitivity as the camera
+    /// approaches the lower limit. Has no effect if either limit is None
     /// Defaults to None
     pub orbit_sensitivity_scaling: Option<f32>,
     /// How much smoothing is applied to the orbit motion. A value of `0.0` disables smoothing,
     /// so there's a 1:1 mapping of input to camera position. A value of `1.0` is infinite
-    /// smoothing. Defaults to `0.8`.
+    /// smoothing.
+    /// Defaults to `0.8`.
     pub orbit_smoothness: f32,
-    /// The sensitivity of the panning motion. Defaults to `1.0`.
+    /// The sensitivity of the panning motion. A value of `0.0` disables panning.
+    /// Defaults to `1.0`.
     pub pan_sensitivity: f32,
     /// How much smoothing is applied to the panning motion. A value of `0.0` disables smoothing,
     /// so there's a 1:1 mapping of input to camera position. A value of `1.0` is infinite
-    /// smoothing. Defaults to `0.6`.
+    /// smoothing.
+    /// Defaults to `0.6`.
     pub pan_smoothness: f32,
-    /// The sensitivity of moving the camera closer or further way using the scroll wheel. Defaults to `1.0`.
+    /// The sensitivity of moving the camera closer or further way using the scroll wheel.
+    /// A value of `0.0` disables zooming.
+    /// Defaults to `1.0`.
     pub zoom_sensitivity: f32,
-    /// How sensitivity is scaled as you zoom from zoom_upper_limit to zoom_lower_limit. A value of 1.0
-    /// Will result in a linear decrease in zoom sensitivity as the camera approaches the lower limit.
-    /// has no effect if either limit is None
+    /// How orbit sensitivity is scaled as you zoom from zoom_upper_limit to zoom_lower_limit.
+    /// A value of 1.0 will result in a linear decrease in zoom sensitivity as the camera
+    /// approaches the lower limit. Has no effect if either limit is None
     /// Defaults to None
     pub zoom_sensitivity_scaling: Option<f32>,
     /// How much smoothing is applied to the zoom motion. A value of `0.0` disables smoothing,
     /// so there's a 1:1 mapping of input to camera position. A value of `1.0` is infinite
-    /// smoothing. Defaults to `0.8`.
+    /// smoothing.
+    /// Defaults to `0.8`.
     /// Note that this setting does not apply to pixel-based scroll events, as they are typically
     /// already smooth. It only applies to line-based scroll events.
     pub zoom_smoothness: f32,
-    /// Button used to orbit the camera. Defaults to `Button::Left`.
+    /// Button used to orbit the camera.
+    /// Defaults to `Button::Left`.
     pub button_orbit: MouseButton,
-    /// Button used to pan the camera. Defaults to `Button::Right`.
+    /// Button used to pan the camera.
+    /// Defaults to `Button::Right`.
     pub button_pan: MouseButton,
-    /// Key that must be pressed for `button_orbit` to work. Defaults to `None` (no modifier).
+    /// Button used to zoom the camera, by holding it down and moving the mouse forward and back.
+    /// Defaults to `None`.
+    pub button_zoom: Option<MouseButton>,
+    /// Which axis should zoom the camera when using `button_zoom`.
+    /// Defaults to `ButtonZoomAxis::Y`.
+    pub button_zoom_axis: ButtonZoomAxis,
+    /// Key that must be pressed for `button_orbit` to work.
+    /// Defaults to `None` (no modifier).
     pub modifier_orbit: Option<KeyCode>,
-    /// Key that must be pressed for `button_pan` to work. Defaults to `None` (no modifier).
+    /// Key that must be pressed for `button_pan` to work.
+    /// Defaults to `None` (no modifier).
     pub modifier_pan: Option<KeyCode>,
-    /// Whether to reverse the zoom direction. Defaults to `false`.
+    /// Whether touch controls are enabled.
+    /// Defaults to `true`.
+    pub touch_enabled: bool,
+    /// The control scheme for touch inputs.
+    /// Defaults to `TouchControls::OneFingerOrbit`.
+    pub touch_controls: TouchControls,
+    /// The behavior for trackpad inputs.
+    /// Defaults to `TrackpadBehavior::DefaultZoom`.
+    /// To enable orbit behavior similar to Blender, change this to TrackpadBehavior::BlenderLike.
+    /// For `BlenderLike` panning, add `ShiftLeft` to the `modifier_pan` field.
+    /// For `BlenderLike` zooming, add `ControlLeft` in `modifier_zoom` field.
+    pub trackpad_behavior: TrackpadBehavior,
+    /// Whether to enable pinch-to-zoom functionality on trackpads.
+    /// Defaults to `false`.
+    pub trackpad_pinch_to_zoom_enabled: bool,
+    /// The sensitivity of trackpad gestures when using `BlenderLike` behavior. A value of `0.0`
+    /// effectively disables trackpad orbit/pan functionality. This applies to both orbit and pan.
+    /// operations when using a trackpad with the `BlenderLike` behavior mode.
+    /// Defaults to `1.0`.
+    pub trackpad_sensitivity: f32,
+    /// Whether to reverse the zoom direction. This applies to the button-based zoom `button_zoom`
+    /// as well. If you want button zoom to remain the same, set `button_zoom_reverse` to `true`.
+    /// Defaults to `false`.
     pub reversed_zoom: bool,
-    /// Whether the camera is currently upside down. Updated automatically. Should not be set manually.
+    /// Whether the zoom direction when using `button_zoom` is reversed.
+    /// Defaults to `false`.
+    pub reversed_button_zoom: bool,
+    /// Whether the camera is currently upside down. Updated automatically.
+    /// This is used to determine which way to orbit, because it's more intuitive to reverse the
+    /// orbit direction when upside down.
+    /// Should not be set manually unless you know what you're doing.
+    /// Defaults to `false` (but will be updated immediately).
     pub is_upside_down: bool,
-    /// Whether to allow the camera to go upside down. Defaults to `false`.
+    /// Whether to allow the camera to go upside down.
+    /// Defaults to `false`.
     pub allow_upside_down: bool,
     /// If `false`, disable control of the camera. Defaults to `true`.
     pub enabled: bool,
@@ -236,6 +286,15 @@ pub struct PanOrbitCamera {
     /// This will be automatically set back to `false` after one frame.
     /// Defaults to `false`.
     pub force_update: bool,
+    /// Axis order definition. This can be used to e.g. define a different default
+    /// up direction. The default up is Y, but if you want the camera rotated.
+    /// The axis can be switched.
+    /// Defaults to `[Vec3::X, Vec3::Y, Vec3::Z]`.
+    pub axis: [Vec3; 3],
+    /// Use real time instead of virtual time. Set this to `true` if you want to pause virtual
+    /// time without affecting the camera, for example in a game.
+    /// Defaults to `false`.
+    pub use_real_time: bool,
 }
 
 impl Default for PanOrbitCamera {
@@ -248,33 +307,43 @@ impl Default for PanOrbitCamera {
             allow_upside_down: false,
             orbit_sensitivity: 1.0,
             orbit_sensitivity_scaling: None,
-            orbit_smoothness: 0.8,
+            orbit_smoothness: 0.1,
             pan_sensitivity: 1.0,
-            pan_smoothness: 0.6,
+            pan_smoothness: 0.02,
             zoom_sensitivity: 1.0,
             zoom_sensitivity_scaling: None,
-            zoom_smoothness: 0.8,
+            zoom_smoothness: 0.1,
             button_orbit: MouseButton::Left,
             button_pan: MouseButton::Right,
+            button_zoom: None,
+            button_zoom_axis: ButtonZoomAxis::Y,
+            reversed_button_zoom: false,
             modifier_orbit: None,
             modifier_pan: None,
+            touch_enabled: true,
+            touch_controls: TouchControls::OneFingerOrbit,
+            trackpad_behavior: TrackpadBehavior::Default,
+            trackpad_pinch_to_zoom_enabled: false,
+            trackpad_sensitivity: 1.0,
             reversed_zoom: false,
             enabled: true,
-            alpha: None,
-            beta: None,
-            scale: None,
-            target_alpha: 0.0,
-            target_beta: 0.0,
+            yaw: None,
+            pitch: None,
+            target_yaw: 0.0,
+            target_pitch: 0.0,
             target_radius: 1.0,
-            target_scale: 1.0,
             initialized: false,
-            alpha_upper_limit: None,
-            alpha_lower_limit: None,
-            beta_upper_limit: None,
-            beta_lower_limit: None,
+            yaw_upper_limit: None,
+            yaw_lower_limit: None,
+            pitch_upper_limit: None,
+            pitch_lower_limit: None,
+            focus_bounds_origin: Vec3::ZERO,
+            focus_bounds_shape: None,
             zoom_upper_limit: None,
-            zoom_lower_limit: None,
+            zoom_lower_limit: 0.05,
             force_update: false,
+            axis: [Vec3::X, Vec3::Y, Vec3::Z],
+            use_real_time: false,
         }
     }
 }
@@ -304,58 +373,142 @@ pub struct ActiveCameraData {
     pub manual: bool,
 }
 
-// Gathers data about the active viewport, i.e. the viewport the user is interacting with. This
-// enables multiple viewports/windows.
+/// The shape to restrict the camera's focus inside.
+#[derive(Clone, PartialEq, Debug, Reflect, Copy)]
+pub enum FocusBoundsShape {
+    /// Limit the camera's focus to a sphere centered on `focus_bounds_origin`.
+    Sphere(Sphere),
+    /// Limit the camera's focus to a cuboid centered on `focus_bounds_origin`.
+    Cuboid(Cuboid),
+}
+
+/// The shape to restrict the camera's focus inside.
+#[derive(Clone, PartialEq, Debug, Reflect, Copy)]
+pub enum ButtonZoomAxis {
+    /// Zoom by moving the mouse along the x-axis.
+    X,
+    /// Zoom by moving the mouse along the y-axis.
+    Y,
+    /// Zoom by moving the mouse along either the x-axis or the y-axis.
+    XY,
+}
+
+impl From<Sphere> for FocusBoundsShape {
+    fn from(value: Sphere) -> Self {
+        Self::Sphere(value)
+    }
+}
+
+impl From<Cuboid> for FocusBoundsShape {
+    fn from(value: Cuboid) -> Self {
+        Self::Cuboid(value)
+    }
+}
+
+/// Allows for changing the `TrackpadBehavior` from default to the way it works in Blender.
+/// In Blender the trackpad orbits when scrolling. If you hold down the `ShiftLeft`, it Pans and
+/// holding down `ControlLeft` will Zoom.
+#[derive(Clone, PartialEq, Debug, Reflect, Copy)]
+pub enum TrackpadBehavior {
+    /// Default touchpad behavior. I.e., no special gesture support, scrolling on the touchpad (vertically) will zoom, as it does with a mouse.
+    Default,
+    /// Blender-like touchpad behavior. Scrolling on the touchpad will orbit, and you can pinch to zoom. Optionally you can pan, or switch scroll to zoom, by holding down a modifier.
+    BlenderLike {
+        /// Modifier key that enables panning while scrolling
+        modifier_pan: Option<KeyCode>,
+
+        /// Modifier key that enables panning while scrolling
+        modifier_zoom: Option<KeyCode>,
+    },
+}
+
+impl TrackpadBehavior {
+    /// Creates a `BlenderLike` variant with default modifiers (Shift for pan, Ctrl for zoom)
+    pub fn blender_default() -> Self {
+        Self::BlenderLike {
+            modifier_pan: Some(KeyCode::ShiftLeft),
+            modifier_zoom: Some(KeyCode::ControlLeft),
+        }
+    }
+}
+
+/// Gather data about the active viewport, i.e. the viewport the user is interacting with.
+/// Enables multiple viewports/windows.
+#[allow(clippy::too_many_arguments)]
 fn active_viewport_data(
     mut active_cam: ResMut<ActiveCameraData>,
-    mouse_input: Res<Input<MouseButton>>,
-    key_input: Res<Input<KeyCode>>,
-    scroll_events: EventReader<MouseWheel>,
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    key_input: Res<ButtonInput<KeyCode>>,
+    pinch_events: MessageReader<PinchGesture>,
+    scroll_events: MessageReader<MouseWheel>,
+    touches: Res<Touches>,
     primary_windows: Query<&Window, With<PrimaryWindow>>,
     other_windows: Query<&Window, Without<PrimaryWindow>>,
     orbit_cameras: Query<(Entity, &Camera, &PanOrbitCamera)>,
+    #[cfg(feature = "bevy_egui")] egui_wants_focus: Res<EguiWantsFocus>,
 ) {
     let mut new_resource = ActiveCameraData::default();
     let mut max_cam_order = 0;
 
     let mut has_input = false;
     for (entity, camera, pan_orbit) in orbit_cameras.iter() {
-        let input_just_activated = util::orbit_just_pressed(pan_orbit, &mouse_input, &key_input)
-            || util::pan_just_pressed(pan_orbit, &mouse_input, &key_input)
-            || !scroll_events.is_empty();
+        let input_just_activated = input::orbit_just_pressed(pan_orbit, &mouse_input, &key_input)
+            || input::pan_just_pressed(pan_orbit, &mouse_input, &key_input)
+            || !pinch_events.is_empty()
+            || !scroll_events.is_empty()
+            || button_zoom_just_pressed(pan_orbit, &mouse_input)
+            || (touches.iter_just_pressed().count() > 0
+                && touches.iter_just_pressed().count() == touches.iter().count());
 
         if input_just_activated {
             has_input = true;
-            // First check if cursor is in the same window as this camera
-            if let RenderTarget::Window(win_ref) = camera.target {
-                let window = match win_ref {
-                    WindowRef::Primary => primary_windows
-                        .get_single()
-                        .expect("Must exist, since the camera is referencing it"),
-                    WindowRef::Entity(entity) => other_windows
-                        .get(entity)
-                        .expect("Must exist, since the camera is referencing it"),
-                };
-                if let Some(cursor_pos) = window.cursor_position() {
-                    // Now check if cursor is within this camera's viewport
-                    if let Some(Rect { min, max }) = camera.logical_viewport_rect() {
-                        // Window coordinates have Y starting at the bottom, so we need to reverse
-                        // the y component before comparing with the viewport rect
-                        let cursor_in_vp = cursor_pos.x > min.x
-                            && cursor_pos.x < max.x
-                            && cursor_pos.y > min.y
-                            && cursor_pos.y < max.y;
+            #[allow(unused_mut, unused_assignments)]
+            let mut should_get_input = true;
+            #[cfg(feature = "bevy_egui")]
+            {
+                should_get_input = !egui_wants_focus.prev && !egui_wants_focus.curr;
+            }
+            if should_get_input {
+                // First check if cursor is in the same window as this camera
+                if let RenderTarget::Window(win_ref) = camera.target {
+                    let Some(window) = (match win_ref {
+                        WindowRef::Primary => primary_windows.single().ok(),
+                        WindowRef::Entity(entity) => other_windows.get(entity).ok(),
+                    }) else {
+                        // Window does not exist - maybe it was closed and the camera not cleaned up
+                        continue;
+                    };
 
-                        // Only set if camera order is higher. This may overwrite a previous value
-                        // in the case the viewport is overlapping another viewport.
-                        if cursor_in_vp && camera.order >= max_cam_order {
-                            new_resource = ActiveCameraData {
-                                entity: Some(entity),
-                                viewport_size: camera.logical_viewport_size(),
-                                window_size: Some(Vec2::new(window.width(), window.height())),
-                                manual: false,
-                            };
-                            max_cam_order = camera.order;
+                    // Is the cursor/touch in this window?
+                    // Note: there's a bug in winit that causes `window.cursor_position()` to return
+                    // a `Some` value even if the cursor is not in this window, in very specific cases.
+                    // See: https://github.com/Plonq/bevy_panorbit_camera/issues/22
+                    if let Some(input_position) = window.cursor_position().or(touches
+                        .iter_just_pressed()
+                        .collect::<Vec<_>>()
+                        .first()
+                        .map(|touch| touch.position()))
+                    {
+                        // Now check if cursor is within this camera's viewport
+                        if let Some(Rect { min, max }) = camera.logical_viewport_rect() {
+                            // Window coordinates have Y starting at the bottom, so we need to reverse
+                            // the y component before comparing with the viewport rect
+                            let cursor_in_vp = input_position.x > min.x
+                                && input_position.x < max.x
+                                && input_position.y > min.y
+                                && input_position.y < max.y;
+
+                            // Only set if camera order is higher. This may overwrite a previous value
+                            // in the case the viewport is overlapping another viewport.
+                            if cursor_in_vp && camera.order >= max_cam_order {
+                                new_resource = ActiveCameraData {
+                                    entity: Some(entity),
+                                    viewport_size: camera.logical_viewport_size(),
+                                    window_size: Some(Vec2::new(window.width(), window.height())),
+                                    manual: false,
+                                };
+                                max_cam_order = camera.order;
+                            }
                         }
                     }
                 }
@@ -371,78 +524,94 @@ fn active_viewport_data(
 /// Main system for processing input and converting to transformations
 fn pan_orbit_camera(
     active_cam: Res<ActiveCameraData>,
-    mouse_input: Res<Input<MouseButton>>,
-    key_input: Res<Input<KeyCode>>,
-    mut mouse_motion: EventReader<MouseMotion>,
-    mut scroll_events: EventReader<MouseWheel>,
+    mouse_key_tracker: Res<MouseKeyTracker>,
+    touch_tracker: Res<TouchTracker>,
     mut orbit_cameras: Query<(Entity, &mut PanOrbitCamera, &mut Transform, &mut Projection)>,
+    time_real: Res<Time<Real>>,
+    time_virt: Res<Time<Virtual>>,
 ) {
-    let mouse_delta = mouse_motion.read().map(|event| event.delta).sum::<Vec2>();
-
     for (entity, mut pan_orbit, mut transform, mut projection) in orbit_cameras.iter_mut() {
-        // Closures that apply limits to the alpha, beta, and zoom values
+        // Closures that apply limits to the yaw, pitch, and zoom values
         let apply_zoom_limits = {
             let zoom_upper_limit = pan_orbit.zoom_upper_limit;
             let zoom_lower_limit = pan_orbit.zoom_lower_limit;
-            move |zoom: f32| util::apply_limits(zoom, zoom_upper_limit, zoom_lower_limit).max(0.05)
+            move |zoom: f32| zoom.clamp_optional(Some(zoom_lower_limit), zoom_upper_limit)
         };
 
-        let apply_alpha_limits = {
-            let alpha_upper_limit = pan_orbit.alpha_upper_limit;
-            let alpha_lower_limit = pan_orbit.alpha_lower_limit;
-            move |alpha: f32| util::apply_limits(alpha, alpha_upper_limit, alpha_lower_limit)
+        let apply_yaw_limits = {
+            let yaw_upper_limit = pan_orbit.yaw_upper_limit;
+            let yaw_lower_limit = pan_orbit.yaw_lower_limit;
+            move |yaw: f32| yaw.clamp_optional(yaw_lower_limit, yaw_upper_limit)
         };
 
-        let apply_beta_limits = {
-            let beta_upper_limit = pan_orbit.beta_upper_limit;
-            let beta_lower_limit = pan_orbit.beta_lower_limit;
-            move |beta: f32| util::apply_limits(beta, beta_upper_limit, beta_lower_limit)
+        let apply_pitch_limits = {
+            let pitch_upper_limit = pan_orbit.pitch_upper_limit;
+            let pitch_lower_limit = pan_orbit.pitch_lower_limit;
+            move |pitch: f32| pitch.clamp_optional(pitch_lower_limit, pitch_upper_limit)
+        };
+
+        let apply_focus_limits = {
+            let origin = pan_orbit.focus_bounds_origin;
+            let shape = pan_orbit.focus_bounds_shape;
+
+            move |focus: Vec3| {
+                let Some(shape) = shape else {
+                    return focus;
+                };
+
+                match shape {
+                    FocusBoundsShape::Cuboid(shape) => shape.closest_point(focus - origin) + origin,
+                    FocusBoundsShape::Sphere(shape) => shape.closest_point(focus - origin) + origin,
+                }
+            }
         };
 
         if !pan_orbit.initialized {
-            // Calculate alpha, beta, and radius from the camera's position. If user sets all
+            // Calculate yaw, pitch, and radius from the camera's position. If user sets all
             // these explicitly, this calculation is wasted, but that's okay since it will only run
             // once on init.
-            let (alpha, beta, radius) =
-                util::calculate_from_translation_and_focus(transform.translation, pan_orbit.focus);
-            let &mut mut alpha = pan_orbit.alpha.get_or_insert(alpha);
-            let &mut mut beta = pan_orbit.beta.get_or_insert(beta);
+            let (yaw, pitch, radius) = util::calculate_from_translation_and_focus(
+                transform.translation,
+                pan_orbit.focus,
+                pan_orbit.axis,
+            );
+            let &mut mut yaw = pan_orbit.yaw.get_or_insert(yaw);
+            let &mut mut pitch = pan_orbit.pitch.get_or_insert(pitch);
             let &mut mut radius = pan_orbit.radius.get_or_insert(radius);
+            let mut focus = pan_orbit.focus;
 
             // Apply limits
-            alpha = apply_alpha_limits(alpha);
-            beta = apply_beta_limits(beta);
+            yaw = apply_yaw_limits(yaw);
+            pitch = apply_pitch_limits(pitch);
             radius = apply_zoom_limits(radius);
+            focus = apply_focus_limits(focus);
 
             // Set initial values
-            pan_orbit.alpha = Some(alpha);
-            pan_orbit.beta = Some(beta);
+            pan_orbit.yaw = Some(yaw);
+            pan_orbit.pitch = Some(pitch);
             pan_orbit.radius = Some(radius);
-            pan_orbit.target_alpha = alpha;
-            pan_orbit.target_beta = beta;
+            pan_orbit.target_yaw = yaw;
+            pan_orbit.target_pitch = pitch;
             pan_orbit.target_radius = radius;
-            pan_orbit.target_focus = pan_orbit.focus;
+            pan_orbit.target_focus = focus;
 
-            if let Projection::Orthographic(ref mut p) = *projection {
-                // If user hasn't set initial scale value, we want to initialize it with the
-                // projection's scale, otherwise we want to override the projection's scale with
-                // the value the user provided.
-                if pan_orbit.scale.is_none() {
-                    pan_orbit.scale = Some(p.scale);
-                }
-                p.scale = apply_zoom_limits(pan_orbit.scale.expect("Just set to Some above"));
-                pan_orbit.target_scale = p.scale;
-            }
-
-            util::update_orbit_transform(alpha, beta, radius, pan_orbit.focus, &mut transform);
+            util::update_orbit_transform(
+                yaw,
+                pitch,
+                radius,
+                focus,
+                &mut transform,
+                &mut projection,
+                pan_orbit.axis,
+            );
 
             pan_orbit.initialized = true;
         }
 
         // 1 - Get Input
 
+        let mut orbit = Vec2::ZERO;
         let mut pan = Vec2::ZERO;
-        let mut rotation_move = Vec2::ZERO;
         let mut scroll_line = 0.0;
         let mut scroll_pixel = 0.0;
         let mut orbit_button_changed = false;
@@ -451,103 +620,95 @@ fn pan_orbit_camera(
         // it might still be moving (lerping towards target values) when the user is not
         // actively controlling it.
         if pan_orbit.enabled && active_cam.entity == Some(entity) {
-            if util::orbit_pressed(&pan_orbit, &mouse_input, &key_input) {
-                let orbit_sensitivity = match (
-                    pan_orbit.orbit_sensitivity_scaling,
-                    pan_orbit.zoom_lower_limit,
-                    pan_orbit.zoom_upper_limit,
-                ) {
-                    (Some(orbit_sensitivity_scaling), Some(lower_limit), Some(upper_limit)) => {
-                        if lower_limit <= pan_orbit.target_radius
-                            && upper_limit >= pan_orbit.target_radius
-                        {
-                            ((pan_orbit.target_radius - lower_limit) / (upper_limit - lower_limit))
-                                .powf(orbit_sensitivity_scaling)
-                                * pan_orbit.orbit_sensitivity
-                        } else {
-                            pan_orbit.orbit_sensitivity
+            let zoom_direction = match pan_orbit.reversed_zoom {
+                true => -1.0,
+                false => 1.0,
+            };
+
+            orbit = mouse_key_tracker.orbit * pan_orbit.orbit_sensitivity;
+            pan = mouse_key_tracker.pan * pan_orbit.pan_sensitivity;
+            scroll_line =
+                mouse_key_tracker.scroll_line * zoom_direction * pan_orbit.zoom_sensitivity;
+            scroll_pixel =
+                mouse_key_tracker.scroll_pixel * zoom_direction * pan_orbit.zoom_sensitivity;
+            orbit_button_changed = mouse_key_tracker.orbit_button_changed;
+
+            if pan_orbit.touch_enabled {
+                let (touch_orbit, touch_pan, touch_zoom_pixel) = match pan_orbit.touch_controls {
+                    TouchControls::OneFingerOrbit => match touch_tracker.get_touch_gestures() {
+                        TouchGestures::None => (Vec2::ZERO, Vec2::ZERO, 0.0),
+                        TouchGestures::OneFinger(one_finger_gestures) => {
+                            (one_finger_gestures.motion, Vec2::ZERO, 0.0)
                         }
-                    }
-                    _ => pan_orbit.orbit_sensitivity,
-                };
-
-                rotation_move += mouse_delta * orbit_sensitivity;
-            } else if util::pan_pressed(&pan_orbit, &mouse_input, &key_input) {
-                // Pan only if we're not rotating at the moment
-                pan += mouse_delta * pan_orbit.pan_sensitivity;
-            }
-
-            for ev in scroll_events.read() {
-                let direction = match pan_orbit.reversed_zoom {
-                    true => -1.0,
-                    false => 1.0,
-                };
-                let zoom_sensitivity = match (
-                    pan_orbit.zoom_sensitivity_scaling,
-                    pan_orbit.zoom_lower_limit,
-                    pan_orbit.zoom_upper_limit,
-                ) {
-                    (Some(zoom_sensitivity_scaling), Some(lower_limit), Some(upper_limit)) => {
-                        if lower_limit <= pan_orbit.target_radius
-                            && upper_limit >= pan_orbit.target_radius
-                        {
-                            ((pan_orbit.target_radius - lower_limit) / (upper_limit - lower_limit))
-                                .powf(zoom_sensitivity_scaling)
-                                * pan_orbit.zoom_sensitivity
-                        } else {
-                            pan_orbit.zoom_sensitivity
+                        TouchGestures::TwoFinger(two_finger_gestures) => (
+                            Vec2::ZERO,
+                            two_finger_gestures.motion,
+                            two_finger_gestures.pinch * 0.015,
+                        ),
+                    },
+                    TouchControls::TwoFingerOrbit => match touch_tracker.get_touch_gestures() {
+                        TouchGestures::None => (Vec2::ZERO, Vec2::ZERO, 0.0),
+                        TouchGestures::OneFinger(one_finger_gestures) => {
+                            (Vec2::ZERO, one_finger_gestures.motion, 0.0)
                         }
-                    }
-                    _ => pan_orbit.zoom_sensitivity,
+                        TouchGestures::TwoFinger(two_finger_gestures) => (
+                            two_finger_gestures.motion,
+                            Vec2::ZERO,
+                            two_finger_gestures.pinch * 0.015,
+                        ),
+                    },
                 };
 
-                let delta_scroll = ev.y * direction * zoom_sensitivity;
-                match ev.unit {
-                    MouseScrollUnit::Line => {
-                        scroll_line += delta_scroll;
-                    }
-                    MouseScrollUnit::Pixel => {
-                        scroll_pixel += delta_scroll * 0.005;
-                    }
-                };
-            }
-
-            if util::orbit_just_pressed(&pan_orbit, &mouse_input, &key_input)
-                || util::orbit_just_released(&pan_orbit, &mouse_input, &key_input)
-            {
-                orbit_button_changed = true;
+                orbit += touch_orbit * pan_orbit.orbit_sensitivity;
+                pan += touch_pan * pan_orbit.pan_sensitivity;
+                scroll_pixel += touch_zoom_pixel * zoom_direction * pan_orbit.zoom_sensitivity;
             }
         }
 
-        // 2 - Process input into target alpha/beta, or focus, radius
+        // 2 - Process input into target yaw/pitch, or focus, radius
 
+        // Only check for upside down when orbiting started or ended this frame,
+        // so we don't reverse the yaw direction while the user is still dragging
         if orbit_button_changed {
-            // Only check for upside down when orbiting started or ended this frame,
-            // so we don't reverse the alpha direction while the user is still dragging
-            let wrapped_beta = (pan_orbit.target_beta % TAU).abs();
-            pan_orbit.is_upside_down = wrapped_beta > TAU / 4.0 && wrapped_beta < 3.0 * TAU / 4.0;
+            let world_up = pan_orbit.axis[1];
+            pan_orbit.is_upside_down = transform.up().dot(world_up) < 0.0;
         }
 
         let mut has_moved = false;
-        if rotation_move.length_squared() > 0.0 {
+
+        // Apply distance-based orbit damping if configured
+        if let (Some(scaling_factor), Some(upper)) = (
+            pan_orbit.orbit_sensitivity_scaling,
+            pan_orbit.zoom_upper_limit,
+        ) {
+            let lower = pan_orbit.zoom_lower_limit;
+            if lower <= pan_orbit.target_radius && pan_orbit.target_radius <= upper {
+                let scale =
+                    ((pan_orbit.target_radius - lower) / (upper - lower)).powf(scaling_factor);
+                orbit *= scale;
+            }
+        }
+
+        if orbit.length_squared() > 0.0 {
             // Use window size for rotation otherwise the sensitivity
             // is far too high for small viewports
             if let Some(win_size) = active_cam.window_size {
                 let delta_x = {
-                    let delta = rotation_move.x / win_size.x * PI * 2.0;
+                    let delta = orbit.x / win_size.x * PI * 2.0;
                     if pan_orbit.is_upside_down {
                         -delta
                     } else {
                         delta
                     }
                 };
-                let delta_y = rotation_move.y / win_size.y * PI;
-                pan_orbit.target_alpha -= delta_x;
-                pan_orbit.target_beta += delta_y;
+                let delta_y = orbit.y / win_size.y * PI;
+                pan_orbit.target_yaw -= delta_x;
+                pan_orbit.target_pitch += delta_y;
 
                 has_moved = true;
             }
-        } else if pan.length_squared() > 0.0 {
+        }
+        if pan.length_squared() > 0.0 {
             // Make panning distance independent of resolution and FOV,
             if let Some(vp_size) = active_cam.viewport_size {
                 let mut multiplier = 1.0;
@@ -562,107 +723,119 @@ fn pan_orbit_camera(
                     Projection::Orthographic(ref p) => {
                         pan *= Vec2::new(p.area.width(), p.area.height()) / vp_size;
                     }
+                    Projection::Custom(_) => todo!(),
                 }
                 // Translate by local axes
-                let right = transform.rotation * Vec3::X * -pan.x;
-                let up = transform.rotation * Vec3::Y * pan.y;
+                let right = transform.rotation * pan_orbit.axis[0] * -pan.x;
+                let up = transform.rotation * pan_orbit.axis[1] * pan.y;
                 let translation = (right + up) * multiplier;
                 pan_orbit.target_focus += translation;
                 has_moved = true;
             }
-        } else if (scroll_line + scroll_pixel).abs() > 0.0 {
-            // Choose different reference values based on the current projection
-            let pan_orbit = &mut *pan_orbit;
-            let (target_value, value) = if let Projection::Orthographic(_) = *projection {
-                (&mut pan_orbit.target_scale, &mut pan_orbit.scale)
-            } else {
-                (&mut pan_orbit.target_radius, &mut pan_orbit.radius)
-            };
+        }
+        // Apply distance-based zoom damping if configured
+        if let (Some(scaling_factor), Some(upper)) = (
+            pan_orbit.zoom_sensitivity_scaling,
+            pan_orbit.zoom_upper_limit,
+        ) {
+            let lower = pan_orbit.zoom_lower_limit;
+            if lower <= pan_orbit.target_radius && pan_orbit.target_radius <= upper {
+                let scale =
+                    ((pan_orbit.target_radius - lower) / (upper - lower)).powf(scaling_factor);
+                scroll_line *= scale;
+                scroll_pixel *= scale;
+            }
+        }
 
+        if (scroll_line + scroll_pixel).abs() > 0.0 {
             // Calculate the impact of scrolling on the reference value
-            let line_delta = -scroll_line * (*target_value) * 0.2;
-            let pixel_delta = -scroll_pixel * (*target_value) * 0.2;
+            let line_delta = -scroll_line * (pan_orbit.target_radius) * 0.2;
+            let pixel_delta = -scroll_pixel * (pan_orbit.target_radius) * 0.2;
 
             // Update the target value
-            *target_value += line_delta + pixel_delta;
+            pan_orbit.target_radius += line_delta + pixel_delta;
 
             // If it is pixel-based scrolling, add it directly to the current value
-            *value = value.map(|value| apply_zoom_limits(value + pixel_delta));
+            pan_orbit.radius = pan_orbit
+                .radius
+                .map(|value| apply_zoom_limits(value + pixel_delta));
 
             has_moved = true;
         }
 
         // 3 - Apply constraints
 
-        pan_orbit.target_alpha = apply_alpha_limits(pan_orbit.target_alpha);
-        pan_orbit.target_beta = apply_beta_limits(pan_orbit.target_beta);
+        pan_orbit.target_yaw = apply_yaw_limits(pan_orbit.target_yaw);
+        pan_orbit.target_pitch = apply_pitch_limits(pan_orbit.target_pitch);
         pan_orbit.target_radius = apply_zoom_limits(pan_orbit.target_radius);
-        pan_orbit.target_scale = apply_zoom_limits(pan_orbit.target_scale);
+        pan_orbit.target_focus = apply_focus_limits(pan_orbit.target_focus);
 
         if !pan_orbit.allow_upside_down {
-            pan_orbit.target_beta =
-                util::apply_limits(pan_orbit.target_beta, Some(PI / 2.0), Some(-PI / 2.0));
+            pan_orbit.target_pitch = pan_orbit.target_pitch.clamp(-PI / 2.0, PI / 2.0);
         }
 
         // 4 - Update the camera's transform based on current values
 
-        if let (Some(alpha), Some(beta), Some(radius)) =
-            (pan_orbit.alpha, pan_orbit.beta, pan_orbit.radius)
+        let delta = if pan_orbit.use_real_time {
+            time_real.delta_secs()
+        } else {
+            time_virt.delta_secs()
+        };
+
+        if let (Some(yaw), Some(pitch), Some(radius)) =
+            (pan_orbit.yaw, pan_orbit.pitch, pan_orbit.radius)
         {
             if has_moved
-                || pan_orbit.target_alpha != alpha
-                || pan_orbit.target_beta != beta
+                // For smoothed values, we must check whether current value is different from target
+                // value. If we only checked whether the values were non-zero this frame, then
+                // the camera would instantly stop moving as soon as you stopped moving it, instead
+                // of smoothly stopping
+                || pan_orbit.target_yaw != yaw
+                || pan_orbit.target_pitch != pitch
                 || pan_orbit.target_radius != radius
                 || pan_orbit.target_focus != pan_orbit.focus
-                // Unlike the rest, scale will always be None for non-orthographic cameras,
-                // so we can't include in the if let above
-                || Some(pan_orbit.target_scale) != pan_orbit.scale
                 || pan_orbit.force_update
             {
                 // Interpolate towards the target values
-                let new_alpha = util::lerp_and_snap_f32(
-                    alpha,
-                    pan_orbit.target_alpha,
+                let new_yaw = util::lerp_and_snap_f32(
+                    yaw,
+                    pan_orbit.target_yaw,
                     pan_orbit.orbit_smoothness,
+                    delta,
                 );
-                let new_beta = util::lerp_and_snap_f32(
-                    beta,
-                    pan_orbit.target_beta,
+                let new_pitch = util::lerp_and_snap_f32(
+                    pitch,
+                    pan_orbit.target_pitch,
                     pan_orbit.orbit_smoothness,
+                    delta,
                 );
                 let new_radius = util::lerp_and_snap_f32(
                     radius,
                     pan_orbit.target_radius,
                     pan_orbit.zoom_smoothness,
-                );
-                let new_scale = util::lerp_and_snap_f32(
-                    pan_orbit.scale.unwrap_or(pan_orbit.target_scale),
-                    pan_orbit.target_scale,
-                    pan_orbit.zoom_smoothness,
+                    delta,
                 );
                 let new_focus = util::lerp_and_snap_vec3(
                     pan_orbit.focus,
                     pan_orbit.target_focus,
                     pan_orbit.pan_smoothness,
+                    delta,
                 );
 
-                if let Projection::Orthographic(ref mut p) = *projection {
-                    p.scale = new_scale;
-                }
-
                 util::update_orbit_transform(
-                    new_alpha,
-                    new_beta,
+                    new_yaw,
+                    new_pitch,
                     new_radius,
                     new_focus,
                     &mut transform,
+                    &mut projection,
+                    pan_orbit.axis,
                 );
 
                 // Update the current values
-                pan_orbit.alpha = Some(new_alpha);
-                pan_orbit.beta = Some(new_beta);
+                pan_orbit.yaw = Some(new_yaw);
+                pan_orbit.pitch = Some(new_pitch);
                 pan_orbit.radius = Some(new_radius);
-                pan_orbit.scale = Some(new_scale);
                 pan_orbit.focus = new_focus;
                 pan_orbit.force_update = false;
             }

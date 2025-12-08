@@ -1,20 +1,20 @@
 //! Demonstrates the ability to manually override which instance of PanOrbitCamera receives input
 //! events, which is necessary when rendering to a texture/image instead of a window/viewport.
 //!
+//! In this example, input controls the camera that is rendering the texture applied to the cube,
+//! rather than the main window camera.
+//!
 //! This example is based off Bevy's render_to_texture example.
 
 use std::f32::consts::PI;
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::window::PrimaryWindow;
 use bevy::{
-    core_pipeline::clear_color::ClearColorConfig,
+    camera::{ImageRenderTarget, RenderTarget},
     prelude::*,
-    render::{
-        camera::RenderTarget,
-        render_resource::{
-            Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-        },
-        view::RenderLayers,
+    render::render_resource::{
+        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     },
 };
 use bevy_panorbit_camera::{ActiveCameraData, PanOrbitCamera, PanOrbitCameraPlugin};
@@ -72,9 +72,9 @@ fn setup(
 
     let image_handle = images.add(image);
 
-    let cube_handle = meshes.add(Mesh::from(shape::Cube { size: 4.0 }));
+    let cube_handle = meshes.add(Cuboid::new(4.0, 4.0, 4.0));
     let cube_material_handle = materials.add(StandardMaterial {
-        base_color: Color::rgb(0.8, 0.7, 0.6),
+        base_color: Color::srgb(0.8, 0.7, 0.6),
         reflectance: 0.02,
         unlit: false,
         ..default()
@@ -85,49 +85,39 @@ fn setup(
 
     // The cube that will be rendered to the texture.
     commands.spawn((
-        PbrBundle {
-            mesh: cube_handle,
-            material: cube_material_handle,
-            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
-            ..default()
-        },
+        Mesh3d(cube_handle),
+        MeshMaterial3d(cube_material_handle),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
         FirstPassCube,
-        first_pass_layer,
+        first_pass_layer.clone(),
     ));
 
     // Light
     // NOTE: Currently lights are shared between passes - see https://github.com/bevyengine/bevy/issues/3462
-    commands.spawn(PointLightBundle {
-        transform: Transform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
-        ..default()
-    });
+    commands.spawn((
+        PointLight::default(),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
+    ));
 
     // The camera for the first pass cube that will be rendered to the texture. This is the camera
     // that is controlled by PanOrbitCamera.
     let pan_orbit_id = commands
         .spawn((
-            Camera3dBundle {
-                camera_3d: Camera3d {
-                    clear_color: ClearColorConfig::Custom(Color::WHITE),
-                    ..default()
-                },
-                camera: Camera {
-                    // render before the "main pass" camera
-                    order: -1,
-                    target: RenderTarget::Image(image_handle.clone()),
-                    ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 15.0))
-                    .looking_at(Vec3::ZERO, Vec3::Y),
+            Camera {
+                // render before the "main pass" camera
+                clear_color: ClearColorConfig::Custom(Color::WHITE),
+                order: -1,
+                target: RenderTarget::Image(ImageRenderTarget::from(image_handle.clone())),
                 ..default()
             },
+            Transform::from_translation(Vec3::new(0.0, 0.0, 15.0)).looking_at(Vec3::ZERO, Vec3::Y),
             PanOrbitCamera::default(),
             first_pass_layer,
         ))
         .id();
 
     let cube_size = 4.0;
-    let cube_handle = meshes.add(Mesh::from(shape::Box::new(cube_size, cube_size, cube_size)));
+    let cube_handle = meshes.add(Cuboid::new(cube_size, cube_size, cube_size));
 
     // This material has the texture that has been rendered.
     let material_handle = materials.add(StandardMaterial {
@@ -139,28 +129,24 @@ fn setup(
 
     // Main pass cube, with material containing the rendered first pass texture.
     commands.spawn((
-        PbrBundle {
-            mesh: cube_handle,
-            material: material_handle,
-            transform: Transform::from_xyz(0.0, 0.0, 1.5)
-                .with_rotation(Quat::from_rotation_x(-PI / 5.0)),
-            ..default()
-        },
+        Mesh3d(cube_handle),
+        MeshMaterial3d(material_handle),
+        Transform::from_xyz(0.0, 0.0, 1.5).with_rotation(Quat::from_rotation_x(-PI / 5.0)),
         MainPassCube,
     ));
 
     // The main pass camera.
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 0.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 0.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 
     // Set up manual override of PanOrbitCamera. Note that this must run after PanOrbitCameraPlugin
     // is added, otherwise ActiveCameraData will be overwritten.
     // Note: you probably want to update the `viewport_size` and `window_size` whenever they change,
     // I haven't done this here for simplicity.
     let primary_window = windows
-        .get_single()
+        .single()
         .expect("There is only ever one primary window");
     active_cam.set_if_neq(ActiveCameraData {
         // Set the entity to the entity ID of the camera you want to control. In this case, it's
@@ -179,7 +165,7 @@ fn setup(
 /// Rotates the outer cube (main pass)
 fn cube_rotator_system(time: Res<Time>, mut query: Query<&mut Transform, With<MainPassCube>>) {
     for mut transform in &mut query {
-        transform.rotate_x(1.0 * time.delta_seconds());
-        transform.rotate_y(0.7 * time.delta_seconds());
+        transform.rotate_x(1.0 * time.delta_secs());
+        transform.rotate_y(0.7 * time.delta_secs());
     }
 }
