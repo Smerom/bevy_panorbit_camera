@@ -65,6 +65,13 @@ fn setup(
             orbit_sensitivity: 1.5,
             pan_sensitivity: 0.5,
             zoom_sensitivity: 0.5,
+            // Taper orbit and zoom sensitivity as the camera nears zoom_lower_limit, but never
+            // below 30% of full sensitivity, so the camera still orbits and zooms at the near
+            // limit instead of stopping dead.
+            orbit_sensitivity_scaling: Some(1.0),
+            orbit_sensitivity_floor: Some(0.3),
+            zoom_sensitivity_scaling: Some(1.0),
+            zoom_sensitivity_floor: Some(0.3),
             // Allow the camera to go upside down
             allow_upside_down: true,
             // Change the controls (these match Blender)

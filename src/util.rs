@@ -55,6 +55,22 @@ pub fn lerp_and_snap_f32(from: f32, to: f32, smoothness: f32, dt: f32) -> f32 {
     new_value
 }
 
+/// Computes the distance-based sensitivity scale used to damp orbit/zoom input as the camera
+/// approaches `lower` (its near zoom limit) from `upper` (its far zoom limit).
+///
+/// Returns `1.0` (no scaling) when `radius` lies outside `[lower, upper]`. Within the band, the
+/// scale follows `((radius - lower) / (upper - lower)).powf(factor)`, remapped onto `[floor, 1.0]`
+/// so it equals `1.0` at `upper` and `floor` at `lower`. A `floor` of `0.0` reproduces the
+/// original, unfloored curve; a `floor` of `1.0` disables the taper entirely (the scale is always
+/// `1.0`).
+pub fn sensitivity_scale(radius: f32, lower: f32, upper: f32, factor: f32, floor: f32) -> f32 {
+    if radius < lower || radius > upper {
+        return 1.0;
+    }
+    let t = ((radius - lower) / (upper - lower)).powf(factor);
+    floor + (1.0 - floor) * t
+}
+
 pub fn lerp_and_snap_vec3(from: Vec3, to: Vec3, smoothness: f32, dt: f32) -> Vec3 {
     let t = smoothness.powi(7);
     let mut new_value = from.lerp(to, 1.0 - t.powf(dt));
@@ -183,6 +199,69 @@ mod approx_equal_tests {
     #[test]
     fn value_outside_threshold_is_not_approx_equal() {
         assert!(!approx_equal(1.0, 1.01));
+    }
+}
+
+#[cfg(test)]
+mod sensitivity_scale_tests {
+    use super::*;
+    use float_cmp::approx_eq;
+
+    #[test]
+    fn unchanged_at_upper_limit() {
+        let scale = sensitivity_scale(10.0, 1.0, 10.0, 1.0, 0.3);
+        assert!(approx_eq!(f32, scale, 1.0));
+    }
+
+    #[test]
+    fn equal_to_floor_at_lower_limit() {
+        let scale = sensitivity_scale(1.0, 1.0, 10.0, 1.0, 0.3);
+        assert!(approx_eq!(f32, scale, 0.3));
+    }
+
+    #[test]
+    fn monotonic_between_limits() {
+        let mut previous = sensitivity_scale(1.0, 1.0, 10.0, 1.0, 0.2);
+        for i in 1..=9 {
+            let radius = 1.0 + i as f32;
+            let scale = sensitivity_scale(radius, 1.0, 10.0, 1.0, 0.2);
+            assert!(
+                scale >= previous,
+                "scale at radius {radius} ({scale}) was less than at the previous radius ({previous})"
+            );
+            previous = scale;
+        }
+    }
+
+    #[test]
+    fn identical_to_original_curve_when_floor_is_zero() {
+        for radius in [1.0, 2.5, 5.0, 7.5, 10.0] {
+            let scale = sensitivity_scale(radius, 1.0, 10.0, 1.0, 0.0);
+            let original = ((radius - 1.0) / (10.0 - 1.0)).powf(1.0);
+            assert!(approx_eq!(f32, scale, original));
+        }
+    }
+
+    #[test]
+    fn flat_when_floor_is_one() {
+        for radius in [1.0, 2.5, 5.0, 7.5, 10.0] {
+            let scale = sensitivity_scale(radius, 1.0, 10.0, 1.0, 1.0);
+            assert!(approx_eq!(f32, scale, 1.0));
+        }
+    }
+
+    #[test]
+    fn unscaled_outside_the_band() {
+        assert!(approx_eq!(
+            f32,
+            sensitivity_scale(0.5, 1.0, 10.0, 1.0, 0.3),
+            1.0
+        ));
+        assert!(approx_eq!(
+            f32,
+            sensitivity_scale(10.5, 1.0, 10.0, 1.0, 0.3),
+            1.0
+        ));
     }
 }
 

@@ -193,6 +193,13 @@ pub struct PanOrbitCamera {
     /// approaches the lower limit. Has no effect if either limit is None
     /// Defaults to None
     pub orbit_sensitivity_scaling: Option<f32>,
+    /// A lower bound on `orbit_sensitivity_scaling`'s computed scale, as a fraction of full
+    /// sensitivity, so the camera still orbits at `zoom_lower_limit` instead of stopping dead.
+    /// A value of `0.0` reproduces `orbit_sensitivity_scaling`'s behaviour exactly; a value of
+    /// `1.0` disables the taper without disabling the feature. Has no effect if
+    /// `orbit_sensitivity_scaling` is `None`.
+    /// Defaults to `None`, which is treated as `0.0`.
+    pub orbit_sensitivity_floor: Option<f32>,
     /// How much smoothing is applied to the orbit motion. A value of `0.0` disables smoothing,
     /// so there's a 1:1 mapping of input to camera position. A value of `1.0` is infinite
     /// smoothing.
@@ -215,6 +222,13 @@ pub struct PanOrbitCamera {
     /// approaches the lower limit. Has no effect if either limit is None
     /// Defaults to None
     pub zoom_sensitivity_scaling: Option<f32>,
+    /// A lower bound on `zoom_sensitivity_scaling`'s computed scale, as a fraction of full
+    /// sensitivity, so the camera still zooms at `zoom_lower_limit` instead of stopping dead.
+    /// A value of `0.0` reproduces `zoom_sensitivity_scaling`'s behaviour exactly; a value of
+    /// `1.0` disables the taper without disabling the feature. Has no effect if
+    /// `zoom_sensitivity_scaling` is `None`.
+    /// Defaults to `None`, which is treated as `0.0`.
+    pub zoom_sensitivity_floor: Option<f32>,
     /// How much smoothing is applied to the zoom motion. A value of `0.0` disables smoothing,
     /// so there's a 1:1 mapping of input to camera position. A value of `1.0` is infinite
     /// smoothing.
@@ -308,11 +322,13 @@ impl Default for PanOrbitCamera {
             allow_upside_down: false,
             orbit_sensitivity: 1.0,
             orbit_sensitivity_scaling: None,
+            orbit_sensitivity_floor: None,
             orbit_smoothness: 0.1,
             pan_sensitivity: 1.0,
             pan_smoothness: 0.02,
             zoom_sensitivity: 1.0,
             zoom_sensitivity_scaling: None,
+            zoom_sensitivity_floor: None,
             zoom_smoothness: 0.1,
             button_orbit: MouseButton::Left,
             button_pan: MouseButton::Right,
@@ -683,11 +699,15 @@ fn pan_orbit_camera(
             pan_orbit.zoom_upper_limit,
         ) {
             let lower = pan_orbit.zoom_lower_limit;
-            if lower <= pan_orbit.target_radius && pan_orbit.target_radius <= upper {
-                let scale =
-                    ((pan_orbit.target_radius - lower) / (upper - lower)).powf(scaling_factor);
-                orbit *= scale;
-            }
+            let floor = pan_orbit.orbit_sensitivity_floor.unwrap_or(0.0);
+            let scale = util::sensitivity_scale(
+                pan_orbit.target_radius,
+                lower,
+                upper,
+                scaling_factor,
+                floor,
+            );
+            orbit *= scale;
         }
 
         if orbit.length_squared() > 0.0 {
@@ -740,12 +760,16 @@ fn pan_orbit_camera(
             pan_orbit.zoom_upper_limit,
         ) {
             let lower = pan_orbit.zoom_lower_limit;
-            if lower <= pan_orbit.target_radius && pan_orbit.target_radius <= upper {
-                let scale =
-                    ((pan_orbit.target_radius - lower) / (upper - lower)).powf(scaling_factor);
-                scroll_line *= scale;
-                scroll_pixel *= scale;
-            }
+            let floor = pan_orbit.zoom_sensitivity_floor.unwrap_or(0.0);
+            let scale = util::sensitivity_scale(
+                pan_orbit.target_radius,
+                lower,
+                upper,
+                scaling_factor,
+                floor,
+            );
+            scroll_line *= scale;
+            scroll_pixel *= scale;
         }
 
         if (scroll_line + scroll_pixel).abs() > 0.0 {
